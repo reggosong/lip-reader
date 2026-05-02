@@ -1,0 +1,14 @@
+{
+  "_comment": "Multi-scale temporal encoder preset. Consumed by Models/ML_VALLR.py when encoder_type='multiscale'.",
+  "encoder_type": "multiscale",
+  "in_dim": 768,
+  "hidden_dim": 256,
+  "branch_kernels": [3, 5, 9],
+  "branch_dilations": [1, 1, 1],
+  "fusion": "concat",
+  "context_layers": 2,
+  "context_heads": 4,
+  "context_type": "transformer",
+  "downsample_factor": 4,
+  "dropout": 0.1
+}

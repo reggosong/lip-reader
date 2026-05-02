@@ -1,0 +1,10 @@
+{
+  "_comment": "Noisy-phoneme LLM fine-tuning preset. Consumed by Models/Llama.py via --noise_config.",
+  "enabled": true,
+  "substitute_prob": 0.15,
+  "insert_prob": 0.05,
+  "delete_prob": 0.05,
+  "include_clean": true,
+  "seed": 1234,
+  "debug_samples": 5
+}

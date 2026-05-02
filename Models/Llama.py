@@ -1,0 +1,425 @@
+import os
+import re
+import sys
+import json
+import torch
+from typing import List, Dict, Optional
+from datasets import load_dataset
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+    DataCollatorWithPadding,
+)
+from peft import LoraConfig, get_peft_model, TaskType
+
+import pronouncing  # CMUdict-based
+
+# Allow running this module either as ``python -m Models.Llama`` or as a
+# top-level script; either way we need to import the sibling ``Data``
+# package that ships the phoneme noise augmenter.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from Data.phoneme_noise import (  # noqa: E402
+    PhonemeNoiseAugmenter,
+    build_augmenter_from_config,
+)
+from Data.phoneme_utils import (  # noqa: E402
+    phoneme_line_to_tokens,
+    strip_stress,
+    text_to_arpabet_words,
+    text_to_phoneme_line,
+)
+
+# ---------- Phoneme utilities (see Data/phoneme_utils.py for the helpers) ----------
+# ``strip_stress``, ``text_to_arpabet_words``, ``text_to_phoneme_line``
+# and ``phoneme_line_to_tokens`` are re-exported from Data.phoneme_utils
+# via the import above so existing imports of these names from
+# ``Models.Llama`` continue to work.
+
+
+# ---------- Dataset building (phonemes -> text) ----------
+
+TAGS = ["<S2S>", "<PHONEMES>", "</PHONEMES>", "<TEXT>"]
+
+
+def _format_prompt(phon_line: str) -> str:
+    """Format a prompt from a (possibly noisy) phoneme line."""
+    return (
+        f"{TAGS[0]}\n"
+        f"{TAGS[1]}\n{phon_line}\n{TAGS[2]}\n"
+        f"{TAGS[3]}\n"
+    )
+
+
+def build_example(
+    text: str,
+    augmenter: Optional[PhonemeNoiseAugmenter] = None,
+) -> Optional[Dict[str, str]]:
+    """
+    Builds one training pair where the INPUT is phonemes and the TARGET is original text.
+    We’ll create:
+      - prompt: everything up to (and including) the <TEXT> line
+      - target: the original text (model should generate this)
+
+    If ``augmenter`` is provided the phoneme sequence is perturbed before
+    being written into the prompt. The *target* is always the clean
+    text, so the LLM learns to map noisy phonemes back to clean words.
+    The returned dict also contains ``clean_phonemes`` and
+    ``noisy_phonemes`` for downstream debug logging.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+
+    clean_line = text_to_phoneme_line(text)
+
+    if augmenter is not None:
+        noisy_tokens = augmenter(phoneme_line_to_tokens(clean_line))
+        noisy_line = " ".join(noisy_tokens)
+    else:
+        noisy_line = clean_line
+
+    prompt = _format_prompt(noisy_line)
+    target = text
+    full = prompt + target
+    return {
+        "prompt": prompt,
+        "target": target,
+        "full": full,
+        "clean_phonemes": clean_line,
+        "noisy_phonemes": noisy_line,
+    }
+
+
+def prepare_split(
+    split: str,
+    augmenter: Optional[PhonemeNoiseAugmenter] = None,
+    include_clean: bool = True,
+):
+    """Build the phonemes->text dataset for a split.
+
+    Parameters
+    ----------
+    split:
+        The wikitext split name.
+    augmenter:
+        Optional :class:`PhonemeNoiseAugmenter`. When provided, each
+        example is augmented.
+    include_clean:
+        When ``augmenter`` is provided, also emit the clean phoneme
+        version of every example. This doubles the dataset size but
+        keeps the LLM anchored to the clean mapping while teaching it
+        the noisy one. Ignored when ``augmenter`` is ``None``.
+    """
+    base = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
+    base = base.filter(lambda ex: isinstance(ex.get("text", ""), str) and len(ex["text"].strip()) > 0)
+
+    def mapper(batch):
+        outs: List[Dict[str, str]] = []
+        for t in batch["text"]:
+            if augmenter is None:
+                ex = build_example(t, augmenter=None)
+                if ex is not None:
+                    outs.append(ex)
+            else:
+                if include_clean:
+                    clean_ex = build_example(t, augmenter=None)
+                    if clean_ex is not None:
+                        outs.append(clean_ex)
+                noisy_ex = build_example(t, augmenter=augmenter)
+                if noisy_ex is not None:
+                    outs.append(noisy_ex)
+
+        if not outs:
+            return {
+                "prompt": [], "target": [], "full": [],
+                "clean_phonemes": [], "noisy_phonemes": [],
+            }
+        return {
+            "prompt":          [o["prompt"]          for o in outs],
+            "target":          [o["target"]          for o in outs],
+            "full":            [o["full"]            for o in outs],
+            "clean_phonemes":  [o["clean_phonemes"]  for o in outs],
+            "noisy_phonemes":  [o["noisy_phonemes"]  for o in outs],
+        }
+
+    ds = base.map(mapper, batched=True, remove_columns=base.column_names)
+    return ds
+
+
+def debug_print_clean_noisy(ds, n: int = 5, tag: str = "") -> None:
+    """Print ``n`` clean/noisy phoneme pairs from a raw dataset."""
+    n = min(n, len(ds))
+    header = f"--- clean/noisy phoneme samples{f' [{tag}]' if tag else ''} ---"
+    print(header)
+    for i in range(n):
+        ex = ds[i]
+        clean = ex.get("clean_phonemes", "<missing>")
+        noisy = ex.get("noisy_phonemes", "<missing>")
+        target = ex.get("target", "<missing>")
+        print(f"[{i:03d}] TEXT : {target}")
+        print(f"      CLEAN: {clean}")
+        print(f"      NOISY: {noisy}")
+    print("-" * len(header))
+
+
+# ---------- Tokenization with prefix-masked labels ----------
+
+def make_tokenize_fn(tokenizer, max_length: int = 512, min_target_tokens: int = 4):
+    """
+    Ensures every example has at least `min_target_tokens` supervised tokens.
+    We encode prompt and target separately, then truncate the prompt to leave room.
+    """
+    pad_id = tokenizer.pad_token_id
+    assert pad_id is not None, "pad_token_id must be set"
+
+    def _tok(batch):
+        input_ids_batch, attn_batch, labels_batch = [], [], []
+
+        for prompt, target in zip(batch["prompt"], batch["target"]):
+            # Encode WITHOUT adding extra special tokens
+            p = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+            t = tokenizer(target, add_special_tokens=False)["input_ids"]
+
+            # Skip pathological cases
+            if len(t) == 0:
+                continue
+
+            # Reserve space for target
+            max_prompt_len = max_length - min_target_tokens
+            if max_prompt_len <= 0:
+                continue
+
+            # Truncate prompt to leave room
+            if len(p) > max_prompt_len:
+                p = p[:max_prompt_len]
+
+            # Fit as much target as possible, but keep at least min_target_tokens
+            space = max_length - len(p)
+            if space < min_target_tokens:
+                # Even after truncating prompt, no room left → skip example
+                continue
+            t = t[:space]
+
+            ids = p + t
+            attn = [1] * len(ids)
+            labs = ([-100] * len(p)) + t[:]  # supervise only target
+
+            # Pad to max_length
+            pad_len = max_length - len(ids)
+            if pad_len > 0:
+                ids  += [pad_id] * pad_len
+                attn += [0] * pad_len
+                labs += [-100] * pad_len
+
+            input_ids_batch.append(ids)
+            attn_batch.append(attn)
+            labels_batch.append(labs)
+
+        return {
+            "input_ids": input_ids_batch,
+            "attention_mask": attn_batch,
+            "labels": labels_batch,
+        }
+    return _tok
+
+def debug_supervision(ds, name):
+    import numpy as np
+    import random
+    n = min(2000, len(ds))
+    cnt = 0
+    for i in range(n):
+        labs = ds[i]["labels"]
+        if any(l != -100 for l in labs):
+            cnt += 1
+    print(f"[{name}] examples with at least 1 supervised token: {cnt}/{n}")
+
+# ---------- Custom collator (keep labels, just pad if needed) ----------
+
+class CausalLMDataCollator(DataCollatorWithPadding):
+    """
+    Uses tokenizer padding for inputs. Expects 'labels' already provided;
+    pads labels with -100 to match input length.
+    """
+    def __call__(self, features):
+        labels = [f["labels"] for f in features]
+        for f in features:
+            f.pop("labels")
+        batch = super().__call__(features)
+
+        max_len = batch["input_ids"].shape[1]
+        padded = []
+        for lab in labels:
+            if len(lab) < max_len:
+                lab = lab + [-100] * (max_len - len(lab))
+            else:
+                lab = lab[:max_len]
+            padded.append(lab)
+        batch["labels"] = torch.tensor(padded, dtype=torch.long)
+        return batch
+
+
+# ---------- Main training with LoRA ----------
+
+def _load_noise_cfg(path: Optional[str]) -> Optional[dict]:
+    """Load a noisy-LLM JSON config; return None when missing."""
+    if not path:
+        return None
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora"):
+    """Train the phoneme-to-text LoRA head.
+
+    Parameters
+    ----------
+    noise_cfg_path:
+        Optional path to a JSON noisy-LLM config. When provided (and the
+        config has ``enabled=true``) the training set is augmented with
+        noisy phoneme inputs as well as the clean ones.
+    output_dir:
+        Where to dump TrainingArguments logs/checkpoints.
+    """
+    noise_cfg = _load_noise_cfg(noise_cfg_path)
+    augmenter = build_augmenter_from_config(noise_cfg)
+    include_clean = True if noise_cfg is None else bool(noise_cfg.get("include_clean", True))
+    debug_samples = 0 if noise_cfg is None else int(noise_cfg.get("debug_samples", 5))
+
+    if augmenter is None:
+        print("Noise augmentation: DISABLED (clean phoneme training).")
+    else:
+        print(
+            "Noise augmentation: ENABLED "
+            f"(sub={augmenter.substitute_prob}, ins={augmenter.insert_prob}, "
+            f"del={augmenter.delete_prob}, include_clean={include_clean})"
+        )
+
+    # 1) Build dataset
+    print("Building phonemes → text dataset...")
+    train_ds = prepare_split("train", augmenter=augmenter, include_clean=include_clean)
+    val_ds   = prepare_split("validation", augmenter=None)
+
+    if debug_samples > 0:
+        debug_print_clean_noisy(train_ds, n=debug_samples, tag="train")
+        debug_print_clean_noisy(val_ds,   n=min(debug_samples, 3), tag="val")
+
+    # 2) Tokenizer & special tokens
+    model_id = "meta-llama/Llama-3.2-3B-Instruct"
+    print("Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+
+    # Add tags and ensure a pad token
+    special = {"additional_special_tokens": TAGS}
+    added = tokenizer.add_special_tokens(special)
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token  # LLaMA convention
+
+    # 3) Tokenize with prompt-masked labels
+    print("Tokenizing dataset with masked labels...")
+    tok_fn = make_tokenize_fn(tokenizer, max_length=512)
+    tokenized_train = train_ds.map(tok_fn, batched=True, remove_columns=train_ds.column_names)
+    tokenized_val   = val_ds.map(tok_fn,   batched=True, remove_columns=val_ds.column_names)
+
+    # 4) Load base model, resize embeddings, then wrap with LoRA
+    print("Loading base model...")
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16)
+
+    if added > 0:
+        model.resize_token_embeddings(len(tokenizer))
+
+    # --- LoRA config (typical for LLaMA) ---
+    lora_cfg = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,
+        target_modules=[
+            "q_proj", "k_proj", "v_proj", "o_proj",      # attention
+            "gate_proj", "up_proj", "down_proj"          # MLP
+        ],
+    )
+    model = get_peft_model(model, lora_cfg)
+    model.print_trainable_parameters()  # sanity check
+
+    # 5) Collator & args
+    collator = CausalLMDataCollator(tokenizer=tokenizer)
+
+    print("Setting up training arguments...")
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        overwrite_output_dir=True,
+        evaluation_strategy="epoch",
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+        num_train_epochs=10,
+        learning_rate=2e-4,          # a bit higher is common for (Q)LoRA
+        weight_decay=0.01,
+        logging_dir='./logs',
+        logging_steps=10,
+        save_total_limit=2,
+        fp16=True,
+        gradient_accumulation_steps=4,
+        warmup_ratio=0.03,
+        report_to="none",
+    )
+
+    vocab = model.get_input_embeddings().num_embeddings
+    print("tokenizer/model vocab:", len(tokenizer), vocab)
+    debug_supervision(tokenized_train, "train")
+    debug_supervision(tokenized_val, "val")
+
+    # 6) Train
+    print("Setting up Trainer...")
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_train,
+        eval_dataset=tokenized_val,
+        data_collator=collator,
+        tokenizer=tokenizer,
+    )
+
+    print("Starting training...")
+    trainer.train()
+
+    # 7) Save adapters (default) + tokenizer
+    print("Saving the LoRA adapters...")
+    trainer.save_model("./llama_phonemes_to_text_lora")  # saves PEFT adapters
+    tokenizer.save_pretrained("./llama_phonemes_to_text_lora")
+
+    # --- Optional: export a merged full model (fp16, larger) ---
+    print("Merging LoRA into base weights for export...")
+    merged = model.merge_and_unload()
+    merged.save_pretrained("./llama_phonemes_to_text_lora_merged")
+    tokenizer.save_pretrained("./llama_phonemes_to_text_lora_merged")
+
+    # 8) Evaluate
+    print("Evaluating the model...")
+    eval_results = trainer.evaluate()
+    print(f"Evaluation results: {eval_results}")
+
+if __name__ == "__main__":
+    import argparse as _ap
+
+    _parser = _ap.ArgumentParser(description="Train phoneme→text LLM (optionally with noisy phonemes).")
+    _parser.add_argument(
+        "--noise_config",
+        type=str,
+        default=None,
+        help="Path to a JSON noisy-LLM config (see configs/noisy_llm.json).",
+    )
+    _parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./results_lora",
+        help="Where to write training outputs.",
+    )
+    _args = _parser.parse_args()
+    main(noise_cfg_path=_args.noise_config, output_dir=_args.output_dir)

@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.env
+.venv/
+venv/
+env/
+.DS_Store
+
+# Data & artefacts
+data/
+checkpoints/
+runs/
+logs/
+outputs/
+wandb/
+*.pt
+*.bin
+*.safetensors
+*.tfevents*
+
+# Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Large media
+*.mp4
+*.avi
+*.mov
+!tests/fixtures/*

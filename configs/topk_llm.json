@@ -1,0 +1,9 @@
+{
+  "_comment": "Top-k CTC hypothesis decoding preset. Consumed by the evaluation script.",
+  "enabled": true,
+  "top_k": 5,
+  "beam_width": 16,
+  "prune_log_prob": -6.0,
+  "prompt_style": "list",
+  "include_scores": true
+}
