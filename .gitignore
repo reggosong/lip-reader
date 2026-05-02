@@ -11,7 +11,7 @@ env/
 .DS_Store
 
 # Data & artefacts
-data/
+# data/
 checkpoints/
 runs/
 logs/
