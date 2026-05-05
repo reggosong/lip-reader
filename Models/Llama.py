@@ -354,8 +354,7 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
     print("Setting up training arguments...")
     training_args = TrainingArguments(
         output_dir=output_dir,
-        overwrite_output_dir=True,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         num_train_epochs=10,
@@ -383,7 +382,7 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
         train_dataset=tokenized_train,
         eval_dataset=tokenized_val,
         data_collator=collator,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
     )
 
     print("Starting training...")
