@@ -273,6 +273,28 @@ def _load_noise_cfg(path: Optional[str]) -> Optional[dict]:
         return json.load(f)
 
 
+def _configure_sdpa_backend() -> None:
+    """Disable the cuDNN SDPA backend on CUDA builds where it's unstable.
+
+    The cuDNN frontend that ships with recent PyTorch (e.g. 2.5+/cu128)
+    sometimes fails to build an execution plan for LLaMA's attention
+    shapes in fp16 and raises::
+
+        RuntimeError: cuDNN Frontend error: [cudnn_frontend] Error:
+        No valid execution plans built.
+
+    Disabling the cuDNN SDPA path makes PyTorch fall back to flash /
+    mem-efficient / math attention, which all work reliably on Colab.
+    Set ``LLAMA_ENABLE_CUDNN_SDP=1`` to opt back in.
+    """
+    if not torch.cuda.is_available():
+        return
+    if os.environ.get("LLAMA_ENABLE_CUDNN_SDP") == "1":
+        return
+    if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+        torch.backends.cuda.enable_cudnn_sdp(False)
+
+
 def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora"):
     """Train the phoneme-to-text LoRA head.
 
@@ -285,6 +307,7 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
     output_dir:
         Where to dump TrainingArguments logs/checkpoints.
     """
+    _configure_sdpa_backend()
     noise_cfg = _load_noise_cfg(noise_cfg_path)
     augmenter = build_augmenter_from_config(noise_cfg)
     include_clean = True if noise_cfg is None else bool(noise_cfg.get("include_clean", True))
@@ -328,7 +351,13 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
 
     # 4) Load base model, resize embeddings, then wrap with LoRA
     print("Loading base model...")
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16)
+    attn_impl = os.environ.get("LLAMA_ATTN_IMPL", "sdpa")
+    print(f"  attn_implementation = {attn_impl}")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=torch.float16,
+        attn_implementation=attn_impl,
+    )
 
     if added > 0:
         model.resize_token_embeddings(len(tokenizer))

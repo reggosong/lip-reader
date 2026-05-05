@@ -33,3 +33,5 @@ wandb/
 *.avi
 *.mov
 !tests/fixtures/*
+
+newVALLR.ipynb
