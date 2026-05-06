@@ -391,7 +391,7 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
         weight_decay=0.01,
         logging_dir='./logs',
         logging_steps=10,
-        save_total_limit=2,
+        save_total_limit=1,
         fp16=True,
         gradient_accumulation_steps=4,
         warmup_ratio=0.03,
