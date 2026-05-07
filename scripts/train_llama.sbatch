@@ -42,8 +42,18 @@
 set -euo pipefail
 
 # -------- 0. Paths & user-tunable knobs -----------------------------------
-# Repo root = parent of this script's directory.
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve the repo root.
+#   * Under SLURM, the script is copied to /var/spool/slurmd/... before
+#     it runs, so ${BASH_SOURCE[0]} no longer points anywhere useful.
+#     SLURM gives us $SLURM_SUBMIT_DIR (= the dir we ran `sbatch` from),
+#     which is the repo root in our submit instructions.
+#   * Outside SLURM (e.g. running this script directly to test), fall
+#     back to the script-relative path.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    REPO_ROOT="$SLURM_SUBMIT_DIR"
+else
+    REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 cd "$REPO_ROOT"
 
 # Where checkpoints / logs land. Default to a per-job dir under the repo;
@@ -96,6 +106,14 @@ export WANDB_MODE=disabled
 export TRANSFORMERS_NO_TF=1
 export LLAMA_ATTN_IMPL="${LLAMA_ATTN_IMPL:-sdpa}"   # fall back to "eager" if SDPA misbehaves
 export TOKENIZERS_PARALLELISM=false
+
+# Throughput knobs consumed by Models/Llama.py. Override on the submit
+# command line if needed (e.g. `LLAMA_BATCH_SIZE=16 sbatch ...`).
+export LLAMA_BATCH_SIZE="${LLAMA_BATCH_SIZE:-8}"
+export LLAMA_GRAD_ACCUM="${LLAMA_GRAD_ACCUM:-1}"
+export LLAMA_NUM_EPOCHS="${LLAMA_NUM_EPOCHS:-2}"
+export LLAMA_DATALOADER_WORKERS="${LLAMA_DATALOADER_WORKERS:-4}"
+export LLAMA_DATA_NUM_PROC="${LLAMA_DATA_NUM_PROC:-4}"
 
 # -------- 4. Diagnostics --------------------------------------------------
 echo "==================== job info ===================="

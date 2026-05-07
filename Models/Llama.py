@@ -147,7 +147,12 @@ def prepare_split(
             "noisy_phonemes":  [o["noisy_phonemes"]  for o in outs],
         }
 
-    ds = base.map(mapper, batched=True, remove_columns=base.column_names)
+    ds = base.map(
+        mapper,
+        batched=True,
+        remove_columns=base.column_names,
+        num_proc=int(os.environ.get("LLAMA_DATA_NUM_PROC", "2")),
+    )
     return ds
 
 
@@ -174,8 +179,7 @@ def make_tokenize_fn(tokenizer, max_length: int = 512, min_target_tokens: int = 
     Ensures every example has at least `min_target_tokens` supervised tokens.
     We encode prompt and target separately, then truncate the prompt to leave room.
     """
-    pad_id = tokenizer.pad_token_id
-    assert pad_id is not None, "pad_token_id must be set"
+    assert tokenizer.pad_token_id is not None, "pad_token_id must be set"
 
     def _tok(batch):
         input_ids_batch, attn_batch, labels_batch = [], [], []
@@ -209,13 +213,10 @@ def make_tokenize_fn(tokenizer, max_length: int = 512, min_target_tokens: int = 
             attn = [1] * len(ids)
             labs = ([-100] * len(p)) + t[:]  # supervise only target
 
-            # Pad to max_length
-            pad_len = max_length - len(ids)
-            if pad_len > 0:
-                ids  += [pad_id] * pad_len
-                attn += [0] * pad_len
-                labs += [-100] * pad_len
-
+            # NOTE: no padding here — the collator pads to the max length in
+            # each batch. This avoids spending compute on [PAD] tokens for
+            # short wikitext lines and is a big throughput win when combined
+            # with ``group_by_length=True``.
             input_ids_batch.append(ids)
             attn_batch.append(attn)
             labels_batch.append(labs)
@@ -346,16 +347,36 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
     # 3) Tokenize with prompt-masked labels
     print("Tokenizing dataset with masked labels...")
     tok_fn = make_tokenize_fn(tokenizer, max_length=512)
-    tokenized_train = train_ds.map(tok_fn, batched=True, remove_columns=train_ds.column_names)
-    tokenized_val   = val_ds.map(tok_fn,   batched=True, remove_columns=val_ds.column_names)
+    _num_proc = int(os.environ.get("LLAMA_DATA_NUM_PROC", "2"))
+    tokenized_train = train_ds.map(
+        tok_fn,
+        batched=True,
+        remove_columns=train_ds.column_names,
+        num_proc=_num_proc,
+    )
+    tokenized_val = val_ds.map(
+        tok_fn,
+        batched=True,
+        remove_columns=val_ds.column_names,
+        num_proc=_num_proc,
+    )
 
     # 4) Load base model, resize embeddings, then wrap with LoRA
     print("Loading base model...")
     attn_impl = os.environ.get("LLAMA_ATTN_IMPL", "sdpa")
     print(f"  attn_implementation = {attn_impl}")
+
+    # Prefer bf16 on Ampere+ (A100/H100) – same speed as fp16 but more
+    # numerically stable for LoRA. Fall back to fp16 elsewhere (e.g. T4).
+    _use_bf16 = bool(
+        torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    )
+    _model_dtype = torch.bfloat16 if _use_bf16 else torch.float16
+    print(f"  model dtype = {_model_dtype}")
+
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch.float16,
+        torch_dtype=_model_dtype,
         attn_implementation=attn_impl,
     )
 
@@ -381,20 +402,34 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
     collator = CausalLMDataCollator(tokenizer=tokenizer)
 
     print("Setting up training arguments...")
+    # Throughput knobs (override via env vars without code changes):
+    #   LLAMA_BATCH_SIZE       (default 8)  – per-device batch size
+    #   LLAMA_GRAD_ACCUM       (default 1)  – gradient accumulation steps
+    #   LLAMA_NUM_EPOCHS       (default 2)  – training epochs
+    #   LLAMA_DATALOADER_WORKERS (default 4)
+    _bs = int(os.environ.get("LLAMA_BATCH_SIZE", "8"))
+    _ga = int(os.environ.get("LLAMA_GRAD_ACCUM", "1"))
+    _ep = float(os.environ.get("LLAMA_NUM_EPOCHS", "2"))
+    _dl_workers = int(os.environ.get("LLAMA_DATALOADER_WORKERS", "4"))
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         eval_strategy="epoch",
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
-        num_train_epochs=10,
+        per_device_train_batch_size=_bs,
+        per_device_eval_batch_size=_bs,
+        num_train_epochs=_ep,
         learning_rate=2e-4,          # a bit higher is common for (Q)LoRA
         weight_decay=0.01,
         logging_dir='./logs',
-        logging_steps=10,
+        logging_steps=50,
         save_total_limit=1,
-        fp16=True,
-        gradient_accumulation_steps=4,
+        bf16=_use_bf16,
+        fp16=not _use_bf16,
+        tf32=torch.cuda.is_available(),
+        gradient_accumulation_steps=_ga,
         warmup_ratio=0.03,
+        group_by_length=True,
+        dataloader_num_workers=_dl_workers,
         report_to="none",
     )
 
