@@ -1,0 +1,36 @@
+# Slim requirements for the phoneme -> text LoRA training run
+# (Models/Llama.py + Data/phoneme_*.py only).
+#
+# Use this on the cluster instead of the full requirements.txt so we
+# skip the heavy video / audio stack (mediapipe, decord, librosa,
+# whisper, jax, ...). Mirrors the install block in newVALLR.ipynb cell 3.
+#
+# Install:
+#     pip install -r requirements-llm.txt
+#
+# We deliberately do NOT pin torch / torchvision / torchaudio here:
+# on Colab and on most HPC nodes a CUDA-matched build is provided
+# (either pre-installed or via `module load`). Re-installing torch
+# from PyPI usually breaks against the system CUDA. If you need to
+# install torch yourself, do it FIRST against the right CUDA index,
+# e.g.:
+#     pip install --index-url https://download.pytorch.org/whl/cu121 \
+#         torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1
+# and only then `pip install -r requirements-llm.txt`.
+
+# ---- Hugging Face stack (must match Models/Llama.py API usage) ----
+transformers>=4.46
+tokenizers>=0.20
+safetensors>=0.4.5
+huggingface_hub>=0.26
+accelerate>=0.34
+peft>=0.13
+datasets>=2.20
+
+# ---- Phoneme + WER utilities ----
+pronouncing>=0.2.0
+cmudict>=1.0.31
+jiwer>=3.0.4
+
+# ---- Sanity / progress bars (datasets pulls these in but pin loosely) ----
+tqdm>=4.66

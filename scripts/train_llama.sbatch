@@ -20,6 +20,15 @@
 #   --mem              : up to ~250G per GPU; 65G is comfortable here.
 # ---------------------------------------------------------------------------
 #
+# One-time setup (login node):
+#     conda create -n vallr python=3.10 -y && conda activate vallr
+#     # 1) torch matched to the cluster CUDA (skip if `module load` provides it):
+#     pip install --index-url https://download.pytorch.org/whl/cu121 \
+#         torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1
+#     # 2) the slim training deps (HF stack + phoneme utils):
+#     pip install -r requirements-llm.txt
+#     echo "hf_xxx" > ~/.hf_token && chmod 600 ~/.hf_token
+#
 # Submit with:
 #     sbatch scripts/train_llama.sbatch
 #
@@ -112,3 +121,7 @@ srun --unbuffered python Models/Llama.py \
     --output_dir   "$OUTPUT_DIR"
 
 echo "Training finished. Outputs in: $OUTPUT_DIR"
+
+
+echo "hf_xxx_your_token" > ~/.hf_token
+chmod 600 ~/.hf_token
