@@ -2,6 +2,8 @@ import os
 import re
 import sys
 import json
+import math
+import random
 import torch
 from typing import List, Dict, Optional
 from datasets import load_dataset
@@ -33,6 +35,10 @@ from Data.phoneme_utils import (  # noqa: E402
     text_to_arpabet_words,
     text_to_phoneme_line,
 )
+from Models.ctc_decode import (  # noqa: E402
+    CTCHypothesis,
+    format_topk_prompt,
+)
 
 # ---------- Phoneme utilities (see Data/phoneme_utils.py for the helpers) ----------
 # ``strip_stress``, ``text_to_arpabet_words``, ``text_to_phoneme_line``
@@ -43,7 +49,10 @@ from Data.phoneme_utils import (  # noqa: E402
 
 # ---------- Dataset building (phonemes -> text) ----------
 
-TAGS = ["<S2S>", "<PHONEMES>", "</PHONEMES>", "<TEXT>"]
+TAGS = [
+    "<S2S>", "<PHONEMES>", "</PHONEMES>", "<TEXT>",
+    "<PHONEME_HYPOTHESES>", "</PHONEME_HYPOTHESES>",
+]
 
 
 def _format_prompt(phon_line: str) -> str:
@@ -95,10 +104,76 @@ def build_example(
     }
 
 
+def _synthetic_scores(n_phonemes: int, k: int) -> List[float]:
+    """Generate plausible synthetic CTC log-prob scores for k hypotheses.
+
+    Real CTC scores are sums of per-frame log-probs, so they scale with
+    sequence length. We simulate this: top-1 gets a high-confidence score,
+    each subsequent rank gets a progressively worse (more negative) score
+    with some jitter so the model learns a range of score gaps.
+
+    The absolute values are in a range typical for a 3B LM decoding
+    ~N phonemes worth of frames at moderate confidence.
+    """
+    base = -random.uniform(0.4, 0.8) * n_phonemes
+    scores = [base]
+    for rank in range(1, k):
+        drop = random.uniform(1.5, 5.0) * (rank ** 0.7) * max(1, n_phonemes / 8)
+        scores.append(base - drop + random.gauss(0, 0.3))
+    return scores
+
+
+def build_topk_example(
+    text: str,
+    augmenter: PhonemeNoiseAugmenter,
+    top_k: int = 5,
+    include_scores: bool = True,
+) -> Optional[Dict[str, str]]:
+    """Build a top-k training example with synthetic CTC hypotheses.
+
+    The top-1 hypothesis is always the clean phoneme sequence (the
+    "true" decoding). The remaining k-1 hypotheses are independently
+    augmented noisy variants. Synthetic log-prob scores are attached
+    so the LLM learns to weight hypotheses by confidence.
+
+    The target is still the original clean text, so the model learns to
+    reconstruct the correct sentence even when the top-k beam contains
+    errors.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+
+    clean_line = text_to_phoneme_line(text)
+    clean_tokens = phoneme_line_to_tokens(clean_line)
+    if not clean_tokens:
+        return None
+
+    scores = _synthetic_scores(len(clean_tokens), top_k)
+
+    hyps: List[CTCHypothesis] = [
+        CTCHypothesis(phonemes=list(clean_tokens), score=scores[0])
+    ]
+    for rank in range(1, top_k):
+        noisy = augmenter(list(clean_tokens))
+        hyps.append(CTCHypothesis(phonemes=noisy, score=scores[rank]))
+
+    prompt = format_topk_prompt(hyps, include_scores=include_scores)
+    return {
+        "prompt": prompt,
+        "target": text,
+        "full": prompt + text,
+        "clean_phonemes": clean_line,
+        "noisy_phonemes": hyps[1].as_string() if len(hyps) > 1 else clean_line,
+    }
+
+
 def prepare_split(
     split: str,
     augmenter: Optional[PhonemeNoiseAugmenter] = None,
     include_clean: bool = True,
+    top_k: int = 1,
+    topk_include_scores: bool = True,
 ):
     """Build the phonemes->text dataset for a split.
 
@@ -111,9 +186,15 @@ def prepare_split(
         example is augmented.
     include_clean:
         When ``augmenter`` is provided, also emit the clean phoneme
-        version of every example. This doubles the dataset size but
-        keeps the LLM anchored to the clean mapping while teaching it
-        the noisy one. Ignored when ``augmenter`` is ``None``.
+        version of every example. Ignored when ``augmenter`` is ``None``.
+    top_k:
+        When > 1 and ``augmenter`` is provided, also emit a top-k
+        hypothesis example for every sentence. This teaches the LLM the
+        ``<PHONEME_HYPOTHESES>`` prompt format with confidence scores,
+        matching the format produced by :func:`Models.ctc_decode.topk_beam_decode`
+        at inference time.
+    topk_include_scores:
+        Whether to attach log-prob scores to each top-k hypothesis line.
     """
     base = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
     base = base.filter(lambda ex: isinstance(ex.get("text", ""), str) and len(ex["text"].strip()) > 0)
@@ -133,6 +214,15 @@ def prepare_split(
                 noisy_ex = build_example(t, augmenter=augmenter)
                 if noisy_ex is not None:
                     outs.append(noisy_ex)
+                if top_k > 1:
+                    topk_ex = build_topk_example(
+                        t,
+                        augmenter=augmenter,
+                        top_k=top_k,
+                        include_scores=topk_include_scores,
+                    )
+                    if topk_ex is not None:
+                        outs.append(topk_ex)
 
         if not outs:
             return {
@@ -313,6 +403,8 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
     augmenter = build_augmenter_from_config(noise_cfg)
     include_clean = True if noise_cfg is None else bool(noise_cfg.get("include_clean", True))
     debug_samples = 0 if noise_cfg is None else int(noise_cfg.get("debug_samples", 5))
+    top_k = 1 if noise_cfg is None else int(noise_cfg.get("top_k", 1))
+    topk_include_scores = True if noise_cfg is None else bool(noise_cfg.get("topk_include_scores", True))
 
     if augmenter is None:
         print("Noise augmentation: DISABLED (clean phoneme training).")
@@ -320,12 +412,24 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
         print(
             "Noise augmentation: ENABLED "
             f"(sub={augmenter.substitute_prob}, ins={augmenter.insert_prob}, "
-            f"del={augmenter.delete_prob}, include_clean={include_clean})"
+            f"del={augmenter.delete_prob}, include_clean={include_clean}, "
+            f"top_k={top_k}, topk_include_scores={topk_include_scores})"
         )
+
+    if top_k > 1 and augmenter is None:
+        print("WARNING: top_k > 1 requires an augmenter (noise config with enabled=true). "
+              "Falling back to top_k=1.")
+        top_k = 1
 
     # 1) Build dataset
     print("Building phonemes → text dataset...")
-    train_ds = prepare_split("train", augmenter=augmenter, include_clean=include_clean)
+    train_ds = prepare_split(
+        "train",
+        augmenter=augmenter,
+        include_clean=include_clean,
+        top_k=top_k,
+        topk_include_scores=topk_include_scores,
+    )
     val_ds   = prepare_split("validation", augmenter=None)
 
     if debug_samples > 0:
@@ -464,16 +568,21 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
     print("Starting training...")
     trainer.train()
 
-    # 7) Save adapters (default) + tokenizer
-    print("Saving the LoRA adapters...")
-    trainer.save_model("./llama_phonemes_to_text_lora")  # saves PEFT adapters
-    tokenizer.save_pretrained("./llama_phonemes_to_text_lora")
+    # 7) Save adapters + tokenizer alongside the checkpoints in output_dir
+    # so they land on Drive (or whatever persistent storage output_dir points
+    # to) rather than in Colab's ephemeral /content/ filesystem.
+    adapters_dir = os.path.join(output_dir, "lora_adapters")
+    merged_dir   = os.path.join(output_dir, "lora_merged")
+
+    print(f"Saving the LoRA adapters to {adapters_dir} ...")
+    trainer.save_model(adapters_dir)
+    tokenizer.save_pretrained(adapters_dir)
 
     # --- Optional: export a merged full model (fp16, larger) ---
-    print("Merging LoRA into base weights for export...")
+    print(f"Merging LoRA into base weights and saving to {merged_dir} ...")
     merged = model.merge_and_unload()
-    merged.save_pretrained("./llama_phonemes_to_text_lora_merged")
-    tokenizer.save_pretrained("./llama_phonemes_to_text_lora_merged")
+    merged.save_pretrained(merged_dir)
+    tokenizer.save_pretrained(merged_dir)
 
     # 8) Evaluate
     print("Evaluating the model...")

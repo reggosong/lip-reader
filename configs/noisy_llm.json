@@ -6,5 +6,9 @@
   "delete_prob": 0.05,
   "include_clean": true,
   "seed": 1234,
-  "debug_samples": 5
+  "debug_samples": 5,
+
+  "_comment_topk": "top_k > 1 adds a top-k hypothesis training example alongside each noisy example.",
+  "top_k": 5,
+  "topk_include_scores": true
 }
