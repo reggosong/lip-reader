@@ -412,7 +412,13 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
     _ep = float(os.environ.get("LLAMA_NUM_EPOCHS", "2"))
     _dl_workers = int(os.environ.get("LLAMA_DATALOADER_WORKERS", "4"))
 
-    training_args = TrainingArguments(
+    # The boolean ``group_by_length`` arg was renamed to
+    # ``train_sampling_strategy="group_by_length"`` in recent transformers
+    # releases (>=4.57 / main). Detect what the installed version
+    # supports so the code runs on both old and new transformers.
+    import dataclasses as _dc
+    _ta_field_names = {f.name for f in _dc.fields(TrainingArguments)}
+    _ta_kwargs = dict(
         output_dir=output_dir,
         eval_strategy="epoch",
         per_device_train_batch_size=_bs,
@@ -425,13 +431,19 @@ def main(noise_cfg_path: Optional[str] = None, output_dir: str = "./results_lora
         save_total_limit=1,
         bf16=_use_bf16,
         fp16=not _use_bf16,
-        tf32=torch.cuda.is_available(),
         gradient_accumulation_steps=_ga,
         warmup_ratio=0.03,
-        group_by_length=True,
         dataloader_num_workers=_dl_workers,
         report_to="none",
     )
+    if "tf32" in _ta_field_names:
+        _ta_kwargs["tf32"] = torch.cuda.is_available()
+    if "train_sampling_strategy" in _ta_field_names:
+        _ta_kwargs["train_sampling_strategy"] = "group_by_length"
+    elif "group_by_length" in _ta_field_names:
+        _ta_kwargs["group_by_length"] = True
+
+    training_args = TrainingArguments(**_ta_kwargs)
 
     vocab = model.get_input_embeddings().num_embeddings
     print("tokenizer/model vocab:", len(tokenizer), vocab)
