@@ -1,0 +1,99 @@
+\begin{thebibliography}{10}
+
+\bibitem{assael2016lipnet}
+Y.~M. Assael, B.~Shillingford, S.~Whiteson, and N.~de~Freitas, ``Lipnet:
+  End-to-end sentence-level lipreading,'' {\em arXiv preprint
+  arXiv:1611.01599}, 2016.
+
+\bibitem{thomas2025vallr}
+M.~Thomas, E.~Fish, and R.~Bowden, ``Vallr: Visual asr language model for lip
+  reading,'' {\em arXiv preprint arXiv:2503.21408}, 2025.
+
+\bibitem{hu2022lora}
+E.~J. Hu, Y.~Shen, P.~Wallis, Z.~Allen-Zhu, Y.~Li, S.~Wang, L.~Wang, and
+  W.~Chen, ``{LoRA}: Low-rank adaptation of large language models,'' in {\em
+  International Conference on Learning Representations}, 2022.
+
+\bibitem{graves2006ctc}
+A.~Graves, S.~Fernandez, F.~Gomez, and J.~Schmidhuber, ``Connectionist temporal
+  classification: Labelling unsegmented sequence data with recurrent neural
+  networks,'' in {\em Proceedings of the 23rd International Conference on
+  Machine Learning}, 2006.
+
+\bibitem{vaswani2017attention}
+A.~Vaswani, N.~Shazeer, N.~Parmar, J.~Uszkoreit, L.~Jones, A.~N. Gomez,
+  L.~Kaiser, and I.~Polosukhin, ``Attention is all you need,'' in {\em Advances
+  in Neural Information Processing Systems}, 2017.
+
+\bibitem{dosovitskiy2021vit}
+A.~Dosovitskiy {\em et~al.}, ``An image is worth 16x16 words: Transformers for
+  image recognition at scale,'' in {\em International Conference on Learning
+  Representations}, 2021.
+
+\bibitem{conformer2020}
+A.~Gulati, J.~Qin, C.-C. Chiu, N.~Parmar, Y.~Zhang, J.~Yu, W.~Han, S.~Wang,
+  Z.~Zhang, Y.~Wu, and R.~Pang, ``Conformer: Convolution-augmented transformer
+  for speech recognition,'' in {\em Interspeech}, 2020.
+
+\bibitem{tong2022videomae}
+Z.~Tong, Y.~Song, J.~Wang, and L.~Wang, ``{VideoMAE}: Masked autoencoders are
+  data-efficient learners for self-supervised video pre-training,'' in {\em
+  Advances in Neural Information Processing Systems}, 2022.
+
+\bibitem{prajwal2022subword}
+K.~R. Prajwal, T.~Afouras, and A.~Zisserman, ``Sub-word level lip reading with
+  visual attention,'' in {\em Proceedings of the IEEE/CVF Conference on
+  Computer Vision and Pattern Recognition}, pp.~5162--5172, 2022.
+
+\bibitem{ma2022multilingual}
+P.~Ma, S.~Petridis, and M.~Pantic, ``Visual speech recognition for multiple
+  languages in the wild,'' {\em Nature Machine Intelligence}, vol.~4,
+  pp.~930--939, 2022.
+
+\bibitem{shi2022avhubert}
+B.~Shi, W.-N. Hsu, K.~Lakhotia, and A.~Mohamed, ``Learning audio-visual speech
+  representation by masked multimodal cluster prediction,'' in {\em
+  International Conference on Learning Representations}, 2022.
+
+\bibitem{shi2022robust}
+B.~Shi, W.-N. Hsu, and A.~Mohamed, ``Robust self-supervised audio-visual speech
+  recognition,'' in {\em Interspeech}, 2022.
+
+\bibitem{ma2023autoavsr}
+P.~Ma, A.~Haliassos, A.~Fernandez-Lopez, H.~Chen, S.~Petridis, and M.~Pantic,
+  ``Auto-{AVSR}: Audio-visual speech recognition with automatic labels,'' in
+  {\em IEEE International Conference on Acoustics, Speech and Signal
+  Processing}, 2023.
+
+\bibitem{afouras2018lrs3}
+T.~Afouras, J.~S. Chung, and A.~Zisserman, ``{LRS3-TED}: a large-scale dataset
+  for visual speech recognition,'' {\em arXiv preprint arXiv:1809.00496}, 2018.
+
+\bibitem{afouras2018lrs2}
+T.~Afouras, J.~S. Chung, A.~Senior, O.~Vinyals, and A.~Zisserman, ``Deep
+  audio-visual speech recognition,'' {\em arXiv preprint arXiv:1809.02108},
+  2018.
+
+\bibitem{touvron2023llama2}
+H.~Touvron, L.~Martin, K.~Stone, P.~Albert, A.~Almahairi, Y.~Babaei,
+  N.~Bashlykov, S.~Batra, P.~Bhargava, S.~Bhosale, {\em et~al.}, ``Llama 2:
+  Open foundation and fine-tuned chat models,'' {\em arXiv preprint
+  arXiv:2307.09288}, 2023.
+
+\bibitem{hong2023watchorlisten}
+J.~Hong, M.~Kim, J.~Yeo, and Y.~M. Ro, ``Watch or listen: Robust audio-visual
+  speech recognition with visual corruption modeling and reliability scoring,''
+  in {\em Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+  Recognition}, 2023.
+
+\bibitem{srivastava2014dropout}
+N.~Srivastava, G.~Hinton, A.~Krizhevsky, I.~Sutskever, and R.~Salakhutdinov,
+  ``Dropout: A simple way to prevent neural networks from overfitting,'' {\em
+  Journal of Machine Learning Research}, vol.~15, pp.~1929--1958, 2014.
+
+\bibitem{guo2017calibration}
+C.~Guo, G.~Pleiss, Y.~Sun, and K.~Q. Weinberger, ``On calibration of modern
+  neural networks,'' in {\em Proceedings of the 34th International Conference
+  on Machine Learning}, pp.~1321--1330, 2017.
+
+\end{thebibliography}

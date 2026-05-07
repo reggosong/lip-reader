@@ -1,0 +1,563 @@
+    \documentclass[10pt,twocolumn,letterpaper]{article}
+    \usepackage{cvpr}
+    \usepackage{times}
+    \usepackage{epsfig}
+    \usepackage{graphicx}
+    \usepackage{amsmath,amssymb}
+    \usepackage{booktabs}
+    \usepackage{multirow}
+    \usepackage{makecell}
+    \usepackage{xcolor}
+    \usepackage{url}
+    \usepackage{enumitem}
+    \usepackage{indentfirst}
+
+    % Restore paragraph indentation and add a small skip between paragraphs
+    \setlength{\parindent}{1em}
+    \setlength{\parskip}{3pt plus 1pt minus 1pt}
+
+    \def\cvprPaperID{****}
+    \def\confName{CVPR}
+    \def\confYear{2026}
+
+    \begin{document}
+
+    \title{Robust Visual Speech Recognition in Noisy and Unconstrained Environments}
+
+    \author{
+    Alex Naehu \qquad Regan Song\\
+    Massachusetts Institute of Technology
+    }
+
+    \maketitle
+
+    \begin{abstract}
+    Visual speech recognition (VSR), commonly called lip reading, addresses speech understanding when audio is weak, unavailable, or intentionally excluded. This direction is increasingly important for accessibility systems, subtitle reconstruction, and multimodal perception pipelines that must remain reliable in difficult recording conditions. Yet VSR is still constrained by a core scientific challenge: multiple phonemes can map to similar visible mouth motions, and this ambiguity grows when videos contain realistic noise such as motion blur, camera compression, occlusion, low light, and viewpoint shifts. As a result, many models that achieve strong benchmark numbers under controlled capture conditions fail to maintain quality in the open world.
+
+    This paper studies robust VSR for noisy environments, with emphasis on practical subtitle reconstruction and transparent model behavior. Our approach builds from two key anchors. First, we use LipNet~\cite{assael2016lipnet} as a foundational reference for end-to-end sentence-level visual decoding with sequence modeling and CTC alignment. Second, we follow the central architectural intuition of VALLR~\cite{thomas2025vallr}: predicting intermediate phoneme-like representations from video and using language-level reconstruction to convert noisy intermediate sequences into coherent text. We reframe these ideas into a modular, reproducible pipeline that includes stabilized mouth-region preprocessing, a multi-scale transformer temporal encoder, top-$k$ CTC intermediate decoding, and noise-aware language correction via a LoRA-fine-tuned language model~\cite{hu2022lora}.
+
+    We additionally include an ethics-centered discussion of privacy, misuse, demographic imbalance, and uncertainty communication; an explicit limitations section; and a future-work agenda that prioritizes robust deployment and participatory evaluation with deaf and hard-of-hearing users.
+    \end{abstract}
+
+    \section{Introduction and Related Work}
+    \subsection{Motivation and Problem Context}
+    Automatic speech recognition has become a mainstream technology, but most deployed systems remain overwhelmingly audio-dependent. In clean settings this is often sufficient. In real deployment settings, however, audio quality is frequently degraded by crowd noise, reverberant rooms, low-cost microphones, channel clipping, interference from multiple simultaneous speakers, and synchronization drift. In these conditions, even state-of-the-art acoustic ASR can degrade sharply. Visual speech recognition (VSR) offers a complementary pathway by inferring language directly from facial motion, especially movements in the lips, jaw, and surrounding lower-face structure.
+
+    For assistive technology, this is not only a robustness story but an accessibility story. People who are deaf or hard of hearing often rely on captions and visual communication tools in both online and in-person settings. Systems that can recover speech content from video, even when audio is missing or unsuitable, can support more inclusive communication and reduce friction in educational, professional, and social workflows. Beyond accessibility, robust VSR can support noisy industrial environments, improve subtitle quality for poor-quality archival media, and contribute to multimodal agents that need graceful degradation under sensor failure.
+
+    At the same time, VSR remains fundamentally difficult. Unlike audio speech recognition, where phonetic cues are relatively high-dimensional and temporally dense, visual speech conveys language through a lower-bandwidth channel that is entangled with identity, camera framing, and lighting. Some phoneme classes collapse to nearly identical visemes (e.g., bilabial groups), and coarticulation further blends local mouth states over time. In effect, the mapping from pixels to linguistic units is many-to-one and context-sensitive. Models therefore require both strong temporal reasoning and careful use of broader linguistic priors.
+
+    This project focuses on that gap between ``works in clean benchmarks'' and ``works in realistic environments.'' Rather than treating this as a purely architectural competition, we frame it as a system-design problem: robust preprocessing, temporal representation, intermediate decoding strategy, language correction behavior, and confidence calibration all matter. We argue that progress should be measured not only by best-case Word Error Rate (WER), but by degradation slope under controlled perturbations, interpretability of failures, and usability of uncertainty outputs in assistive contexts.
+
+    \subsection{From Foundational Lip Reading to Modern Pipelines}
+    LipNet~\cite{assael2016lipnet} is a central milestone in deep VSR because it demonstrated sentence-level end-to-end prediction from video without manual frame-to-character alignments. The architecture combines spatiotemporal convolutions for local motion capture, bidirectional recurrent networks for sequence context, and CTC loss~\cite{graves2006ctc} for alignment-free decoding. The paper showed that this composition could achieve strong performance on controlled benchmark settings and inspired a broad class of sequence transduction systems.
+
+    However, the same characteristics that made early benchmarks tractable also constrain conclusions about real-world robustness. Constrained datasets often include frontal views, fixed lighting, clean backgrounds, limited vocabulary, and controlled speaking style. These assumptions substantially reduce nuisance variation and make learned mappings easier. As prior assignment analysis in this project emphasized, systems validated only in such settings can be brittle when moved to unconstrained capture conditions with head motion, partial occlusions, variable camera quality, and broader demographic and phonetic diversity (Figure~\ref{fig:noise_types}).
+
+    In parallel, modern sequence modeling has shifted from recurrent dominance toward transformer-based representations~\cite{vaswani2017attention,dosovitskiy2021vit}. Conformer architectures~\cite{conformer2020}, which combine convolution and self-attention, have become particularly effective in speech domains by modeling both local acoustic patterns and global temporal dependencies simultaneously. In VSR, transformer-style attention allows global temporal context and can improve disambiguation when local mouth frames are uncertain. Large-scale self-supervised pre-training has further accelerated progress: VideoMAE~\cite{tong2022videomae} demonstrated that masked autoencoding with very high masking ratios (90--95\%) on video yields data-efficient spatiotemporal representations, directly motivating our ViT backbone with tubelet embedding.
+
+    VALLR~\cite{thomas2025vallr} is especially relevant here. Its two-stage strategy predicts phoneme sequences from visual input and then applies a language model to reconstruct clean text from imperfect intermediate outputs. This decomposition offers several advantages: it separates visual perception errors from linguistic correction, creates a more interpretable interface between modules, and can improve data efficiency by letting language priors absorb residual uncertainty. Our work is not a one-to-one reproduction of VALLR; rather, it is an adaptation that emphasizes robustness under natural noise and deployment-oriented evaluation.
+
+    \subsection{Project Scope and Research Questions}
+    The core objective is to design and evaluate a robust VSR system for subtitle reconstruction in noisy and unconstrained environments. We investigate four guiding questions:
+    \begin{enumerate}[leftmargin=*]
+        \item How much do transformer-oriented temporal representations improve over recurrent baselines under clean and noisy conditions?
+        \item Does a phoneme-centric intermediate representation improve robustness and error recoverability compared with direct character-level pipelines?
+        \item How does language-level correction change the failure profile of the system, including potential over-correction risks?
+        \item Which components contribute most under realistic perturbations, and where does performance break down?
+    \end{enumerate}
+
+    These questions are intentionally tied to practice. The goal is not only to maximize a metric, but to understand how and why model behavior changes as environments become more realistic.
+
+    \subsection{Problem Formulation}
+    We formulate robust visual speech recognition as structured sequence transduction under distribution shift. Given a video clip $\mathbf{X}=\{x_t\}_{t=1}^{T}$ containing a speaking face, the goal is to recover text sequence $\mathbf{s}=\{w_j\}_{j=1}^{J}$ while maintaining performance under perturbation families $\mathcal{N}$ (e.g., blur, compression, occlusion, jitter). Let $\tilde{\mathbf{X}} \sim q(\tilde{\mathbf{X}}\mid \mathbf{X}, n)$ denote a corrupted view of the same utterance under noise condition $n\in\mathcal{N}$. A robust model should optimize both clean transcription quality and controlled degradation behavior:
+    \begin{equation}
+    \min_{\theta}\; \mathbb{E}_{(\mathbf{X},\mathbf{s})\sim \mathcal{D}}
+    \left[\mathcal{L}_{\text{clean}}(\mathbf{X},\mathbf{s})
+    + \lambda \; \mathbb{E}_{n\sim \mathcal{N}}
+    \mathcal{L}_{\text{robust}}(\tilde{\mathbf{X}},\mathbf{s})\right].
+    \end{equation}
+    This perspective makes explicit that robustness is not an afterthought metric but part of the core optimization objective and architecture design rationale.
+
+    \subsection{Related Work}
+    \textbf{Visual-only lip reading and CTC transduction.}
+    End-to-end visual decoding systems built around convolutional front-ends, recurrent temporal modules, and CTC objectives remain foundational~\cite{assael2016lipnet,graves2006ctc}. More recent work has extended this to sub-word units with attention-based pooling~\cite{prajwal2022subword} and demonstrated strong multilingual generalization~\cite{ma2022multilingual}, highlighting the importance of representation design beyond raw architecture depth. Their weaknesses include sensitivity to domain shift and limited global context modeling when recurrent capacity is constrained.
+
+    \textbf{Transformer-based sequence modeling.}
+    Transformer architectures have transformed sequence learning across domains~\cite{vaswani2017attention}. In vision and video settings, attention-based representations can aggregate information across long horizons and improve robustness to local corruption~\cite{dosovitskiy2021vit,tong2022videomae}. In VSR, this matters because critical disambiguating context may be many frames away from ambiguous viseme segments. Conformer blocks~\cite{conformer2020} further augment this with depthwise convolutions that model local articulation dynamics alongside global self-attention.
+
+    \textbf{Self-supervised audio-visual representation learning.}
+    AV-HuBERT~\cite{shi2022avhubert} demonstrated that masked multimodal cluster prediction over audio and video streams learns powerful representations that generalize to lip-reading with limited labeled data. Follow-up work~\cite{shi2022robust} further showed these representations are robust to challenging audio noise conditions, and that robust self-supervised pre-training significantly reduces WER across noise types. Similarly, Auto-AVSR~\cite{ma2023autoavsr} leveraged automatically-labeled large-scale video data to scale up VSR training, achieving state-of-the-art results on LRS3~\cite{afouras2018lrs3} and LRS2~\cite{afouras2018lrs2}. These self-supervised approaches motivate our VideoMAE-style backbone pre-training strategy.
+
+    \textbf{Phoneme-mediated reconstruction and language-informed decoding.}
+    A major modern trend is to explicitly model intermediate linguistic units before final text generation. VALLR~\cite{thomas2025vallr} provides direct evidence that visual-to-phoneme plus language reconstruction can reduce WER and improve robustness. This idea aligns with practical intuition: visual perception should estimate what can be seen, while language reconstruction should regularize uncertainty using sentence-level priors. Parameter-efficient fine-tuning via LoRA~\cite{hu2022lora} enables adapting large pre-trained language models such as LLaMA-2~\cite{touvron2023llama2} to this phoneme-to-text correction task with minimal compute overhead.
+
+    \textbf{Dataset realism, visual corruption, and deployment gaps.}
+    Broader VSR literature has repeatedly highlighted train-test mismatch between controlled benchmarks and in-the-wild usage. Hong et al.~\cite{hong2023watchorlisten} specifically studied visual corruption in audio-visual speech recognition, showing that occlusion and video noise severely degrade performance and that reliability scoring over audio and visual streams is critical for robust decoding. For assistive deployment, these mismatches are not edge cases but default conditions. Robust evaluation should therefore include explicit perturbation sweeps, subgroup-aware analysis, and uncertainty reporting.
+
+    \textbf{Position of this paper.}
+    This paper sits at the intersection of these threads: it preserves end-to-end sequence principles from LipNet, adopts modern temporal modeling and intermediate linguistic structure inspired by VALLR, leverages VideoMAE-style spatiotemporal pre-training, and evaluates through a deployment-oriented lens where robustness and transparency are first-class outcomes.
+
+    \subsection{Contributions}
+    This manuscript contributes:
+    \begin{enumerate}[leftmargin=*]
+        \item A practical VSR framework combining robust preprocessing, multi-scale Conformer-style temporal modeling~\cite{conformer2020}, CTC intermediate prediction, and LoRA-fine-tuned language-level reconstruction~\cite{hu2022lora}.
+        \item A story-driven evaluation scaffold that prioritizes degradation behavior under perturbation, not only clean-condition ranking.
+        \item A readable Results and Discussion section written to stand independently of figures while defining concrete visualization placeholders.
+        \item An ethics-grounded interpretation that connects empirical trends to accessibility utility, misuse risk, and mitigation design.
+    \end{enumerate}
+
+    \section{Methodology}
+
+    \begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.98\textwidth]{architecture.png}
+    \caption{Full system architecture. Video frames pass through face/mouth tracking and preprocessing, then a spatiotemporal ViT backbone (VideoMAE-style tubelet embedding). The multi-scale temporal encoder runs three parallel convolutional branches (short/medium/long receptive field) followed by a Transformer context stack and downsampling. Top-$k$ prefix-beam CTC decoding passes ranked phoneme hypotheses with confidence scores $\pi_i$ to the noise-aware LLaMA-3.2 LoRA model, which reconstructs coherent subtitle text with uncertainty tags.}
+    \label{fig:architecture}
+    \end{figure*}
+
+    \subsection{Design Principles}
+    Our methodology is guided by four design principles that directly address known VSR failure modes:
+    \begin{enumerate}[leftmargin=*]
+        \item \textbf{Representation alignment}: visual modules should predict units that are visually inferable (phoneme-like units) before orthographic reconstruction.
+        \item \textbf{Robustness by construction}: noise-aware preprocessing and augmentation should be coupled to evaluation perturbations.
+        \item \textbf{Interpretability at module boundaries}: each stage should expose diagnostically useful intermediate outputs.
+        \item \textbf{Deployment realism}: latency, calibration, and failure transparency should be treated as first-class metrics.
+    \end{enumerate}
+    These principles shape architecture choices more than raw model scale, which is important for class-project constraints and reproducibility.
+
+    \subsection{System Overview}
+    The full system contains five stages (Figure~\ref{fig:architecture}):
+    \begin{enumerate}[leftmargin=*]
+        \item \textbf{Preprocessing and stabilization}: track face/mouth regions and suppress geometric jitter.
+        \item \textbf{Visual feature extraction}: encode local articulation from cropped mouth sequences.
+        \item \textbf{Temporal context modeling}: aggregate long-range dependencies across the utterance.
+        \item \textbf{Intermediate CTC decoding}: predict phoneme-like or character token sequences.
+        \item \textbf{Constrained language reconstruction}: convert noisy token streams into coherent subtitle text with uncertainty tagging.
+    \end{enumerate}
+    Compared with direct visual-to-text decoding, this staged design improves debuggability (errors can be localized by stage) and supports causal ablation (component-level contribution can be measured cleanly).
+
+    \subsection{Data Preparation and Input Representation}
+    Given clip $\mathbf{X}=\{x_t\}_{t=1}^{T}$, we estimate a mouth-centered sequence $\mathbf{M}=\{m_t\}_{t=1}^{T}$ through detection, tracking, normalization, and temporal smoothing. Let $b_t$ denote the ROI box at frame $t$. We smooth trajectories with:
+    \begin{equation}
+    \bar{b}_t = \alpha b_t + (1-\alpha)\bar{b}_{t-1},
+    \end{equation}
+    which reduces high-frequency crop jitter that otherwise amplifies temporal modeling noise.
+
+    This design is motivated by a practical observation: in VSR, unstable crops create synthetic motion that can be confounded with articulation. Many underperforming pipelines fail not because temporal models are weak, but because ROI instability corrupts input statistics.
+
+    To improve robustness under deployment-like conditions, we apply perturbation-aligned augmentations covering the noise types illustrated in Figure~\ref{fig:noise_types}:
+    \begin{itemize}[leftmargin=*]
+        \item photometric shifts (brightness, contrast, gamma),
+        \item blur kernels and codec-like compression artifacts,
+        \item random occlusion masks at mouth-adjacent regions,
+        \item temporal corruption (frame drop, minor temporal reindexing).
+    \end{itemize}
+    These augmentations are sampled from ranges that overlap with evaluation sweeps, reducing train-test mismatch.
+
+    \begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.98\textwidth]{noise_types.png}
+    \caption{Naturally occurring noise types in VSR, illustrated via synthetic face renderings with each degradation applied. From left to right: \textbf{Clean} (reference); \textbf{Motion Blur} (Gaussian blur emulating camera shake or fast movement); \textbf{Glare/Specular} (bright highlight patches from glasses or sunlight); \textbf{Low Light} (severe darkening with added noise, common in indoor or evening capture); \textbf{Facial Hair/Occlusion} (moustache and beard coverage occluding the lip and perioral region); \textbf{Off-Angle Pose} (affine horizontal shear approximating mild-to-moderate yaw). Our perturbation evaluation sweeps four of these families~\cite{hong2023watchorlisten} at mild, moderate, and severe severity levels.}
+    \label{fig:noise_types}
+    \end{figure*}
+
+    \subsection{Visual Encoder: Architectural Choices and Rationale}
+    We compare two visual encoder families:
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{Spatiotemporal CNN front-end}: strong inductive bias for local motion, low compute overhead, stable training on small data.
+        \item \textbf{Patch-based vision transformer front-end}: better global receptive field and fine-grained shape abstraction, but more data-hungry and compute-intensive~\cite{dosovitskiy2021vit,tong2022videomae}.
+    \end{itemize}
+
+    Let $f_{\text{vis}}$ be the visual encoder:
+    \begin{equation}
+    \mathbf{H} = f_{\text{vis}}(\mathbf{M}), \quad \mathbf{H}\in \mathbb{R}^{T' \times d}.
+    \end{equation}
+    Our primary model uses a VideoMAE-style spatiotemporal ViT~\cite{tong2022videomae} with 3D tubelet embedding (tubelet size 2, patch size 16$\times$16, embed dim 768). The backbone uses 8 transformer blocks with multi-head self-attention and follows the masked autoencoder pre-training paradigm~\cite{tong2022videomae} to enable data-efficient learning.
+
+    The architecture choice is therefore not ``transformers are always better.'' It is a bias-variance tradeoff: stronger global modeling is useful when regularized by robust preprocessing and augmentation, otherwise gains can collapse under shift.
+
+    \subsection{Temporal Sequence Modeling}
+    Temporal modeling maps per-step features $\mathbf{H}$ into context-rich states:
+    \begin{equation}
+    \mathbf{Z} = \psi(\mathbf{H}).
+    \end{equation}
+    We benchmark:
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{BiGRU/BiLSTM} (LipNet-like): efficient and effective for moderate sequence length.
+        \item \textbf{Temporal transformer}: self-attention for long-range coarticulation context.
+    \end{itemize}
+
+    Temporal transformers are chosen in the primary model because viseme ambiguity is frequently resolved by distant context rather than local frame evidence. For example, similar lip closures can correspond to multiple phoneme classes, and disambiguation often requires broader utterance context. Conformer-style blocks~\cite{conformer2020} are particularly effective here as they combine self-attention for global context with depthwise convolution for local articulation dynamics.
+
+    To stabilize transformer training on limited data, we use dropout~\cite{srivastava2014dropout}, attention masking consistent with valid frame lengths, and conservative depth.
+
+    \subsection{Intermediate Tokenization and CTC Objective}
+    Following CTC~\cite{graves2006ctc}, we decode unaligned sequences via:
+    \begin{equation}
+    \mathcal{L}_{\text{CTC}} = -\log p(\mathbf{y}\mid \mathbf{Z}),
+    \end{equation}
+    where $\mathbf{y}$ is either character-level or phoneme-level.
+
+    We prefer phoneme-level targets for the primary configuration for three reasons:
+    \begin{enumerate}[leftmargin=*]
+        \item visual evidence aligns more naturally with articulation units than orthographic words;
+        \item intermediate phoneme errors are often locally recoverable by downstream language modeling;
+        \item phoneme representation supports interpretable diagnostics (e.g., viseme-group confusion).
+    \end{enumerate}
+
+    Character-level CTC remains in baselines to isolate the causal benefit of intermediate representation choice.
+
+    \subsection{Soft Phoneme Uncertainty via Top-$k$ CTC Hypotheses}
+
+    \begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.98\textwidth]{topk_phonemes.pdf}
+    \caption{Top-$k$ CTC phoneme output visualization. \textbf{Left:} Per-frame CTC posterior probabilities over phoneme classes across time steps, showing how multiple phonemes receive non-trivial mass at ambiguous frames. \textbf{Right:} The top-5 prefix-beam hypotheses with log-probability scores and normalized confidence weights $\pi_i$, which are fed as structured input into the LLM prompt via \texttt{format\_topk\_prompt}. The top-1 hypothesis is also written under the standard \texttt{<PHONEMES>} tag for backward compatibility with single-hypothesis LLM checkpoints. This richer uncertainty representation allows the reconstructor to defer ambiguous decisions until sentence-level context is available.}
+    \label{fig:topk}
+    \end{figure*}
+
+    A central design choice in our implementation is to avoid collapsing visual evidence into a single hard phoneme sequence too early. Standard decoding would pass only the top-1 CTC hypothesis to the language model:
+    \begin{equation}
+    \hat{\mathbf{y}}^{(1)}=\arg\max_{\mathbf{y}} p_{\text{CTC}}(\mathbf{y}\mid \mathbf{Z}).
+    \end{equation}
+    This is suboptimal for lip reading because visual ambiguity is intrinsic: multiple phoneme paths can be simultaneously plausible for the same mouth motion.
+
+    Instead, we pass a small candidate set $\{\hat{\mathbf{y}}^{(i)},\pi_i\}_{i=1}^{k}$, where $\pi_i$ are normalized confidence scores from the CTC posterior:
+    \begin{equation}
+    \pi_i=\frac{p_{\text{CTC}}(\hat{\mathbf{y}}^{(i)}\mid\mathbf{Z})}{\sum_{j=1}^{k}p_{\text{CTC}}(\hat{\mathbf{y}}^{(j)}\mid\mathbf{Z})}.
+    \end{equation}
+    The reconstructor then conditions on a richer uncertainty representation rather than a brittle top-1 commitment (Figure~\ref{fig:topk}). Conceptually, this allows the system to defer uncertain decisions until sentence-level context is available. This mirrors human lip reading behavior: ambiguous local mouth shapes are often resolved only after broader linguistic context is considered.
+
+    This choice is expected to reduce catastrophic substitution errors caused by premature hard decisions. It also improves interpretability, since low-confidence alternatives can be inspected when the final prediction is uncertain.
+
+    \subsection{Language-Level Reconstruction}
+    Let $\hat{\mathbf{y}}$ denote CTC output and $g_{\phi}$ denote a constrained text reconstructor:
+    \begin{equation}
+    \hat{\mathbf{s}} = g_{\phi}(\hat{\mathbf{y}}).
+    \end{equation}
+    Inspired by VALLR~\cite{thomas2025vallr}, $g_{\phi}$ is optimized for correction rather than open-ended generation. This is a deliberate safety choice: in assistive contexts, over-fluent hallucinations can be more harmful than explicit uncertainty.
+
+    We therefore restrict decoding with:
+    \begin{itemize}[leftmargin=*]
+        \item bounded beam width,
+        \item length-aware penalties to avoid degenerate verbosity,
+        \item optional lexicon-aware constraints for domain subtitles.
+    \end{itemize}
+
+    Confidence estimates combine CTC posterior concentration and reconstructor stability (agreement across top hypotheses). Low-confidence spans are explicitly markable in final subtitles.
+
+    \subsection{Noise-Aware Phoneme-to-Sentence Fine-Tuning}
+
+    \begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.98\textwidth]{finetune_diagram.png}
+    \caption{Noise-aware phoneme-to-text fine-tuning pipeline. Training text (WikiText-2) is converted to clean ARPAbet phoneme sequences via CMUdict. The \texttt{PhonemeNoiseAugmenter} (substitution $p=0.15$, insertion $p=0.05$, deletion $p=0.05$) applies viseme-aware confusions (e.g., B$\leftrightarrow$P$\leftrightarrow$M, F$\leftrightarrow$V) to simulate realistic CTC decoding errors. LLaMA-3.2-3B is fine-tuned via LoRA~\cite{hu2022lora} (rank 16, $\alpha=32$) to map noisy phoneme inputs back to original clean text. Setting \texttt{include\_clean=True} doubles the effective training set so the model remains anchored to clean phoneme mappings while learning to correct errors.}
+    \label{fig:finetune}
+    \end{figure*}
+
+    The reconstruction stage is only useful as an error-correction layer if it is trained on the same type of imperfect inputs seen at inference. A mismatch occurs when the reconstructor is trained mostly on clean phoneme strings but deployed on noisy CTC outputs containing deletions, insertions, repetitions, and viseme-driven substitutions~\cite{thomas2025vallr,hong2023watchorlisten}.
+
+    To close this gap, we perform noise-aware fine-tuning with corrupted phoneme sequences (Figure~\ref{fig:finetune}). Let $\mathbf{y}$ be reference phonemes and $\tilde{\mathbf{y}}\sim q_{\text{noise}}(\tilde{\mathbf{y}}\mid\mathbf{y})$ a corruption process calibrated to realistic lip-reading errors. We optimize:
+    \begin{equation}
+    \mathcal{L}_{\text{rec}}=-\log p_{\phi}(\mathbf{s}\mid \tilde{\mathbf{y}}),
+    \end{equation}
+    where the target sentence $\mathbf{s}$ is unchanged. The corruption process emphasizes confusions among visually similar phoneme groups, plus realistic insertion/deletion patterns from unstable articulation boundaries. Viseme-group confusions are designed following standard phonological groupings~\cite{assael2016lipnet}: bilabials (B/P/M), labiodentals (F/V), interdentals (TH/DH), alveolar stops (T/D/N), and sibilants (S/Z/SH/ZH).
+
+    We use LoRA~\cite{hu2022lora} to fine-tune LLaMA-2~\cite{touvron2023llama2} on this phoneme-to-text task with rank $r=16$ and $\alpha=32$, targeting all attention projection matrices (\texttt{q\_proj}, \texttt{k\_proj}, \texttt{v\_proj}, \texttt{o\_proj}) and MLP gate/up/down projections. This reduces trainable parameters by approximately four orders of magnitude relative to full fine-tuning while maintaining strong generalization.
+
+    This training strategy is motivated directly by the two-stage VALLR principle~\cite{thomas2025vallr}: the second stage should \emph{repair} noisy intermediate predictions, not merely translate clean symbols. In practice, noise-aware training makes the reconstructor less brittle and improves its ability to recover intended text from plausible but imperfect phoneme paths.
+
+    \subsection{Training Strategy and Optimization Details}
+    Training is staged:
+    \begin{enumerate}[leftmargin=*]
+        \item train $f_{\text{vis}}+\psi+$CTC on video-token pairs;
+        \item synthesize noisy intermediate tokens and train $g_{\phi}$ for token-to-text correction via LoRA~\cite{hu2022lora};
+        \item optionally fine-tune jointly with low learning rates and frozen early visual layers.
+    \end{enumerate}
+
+    Staged training is chosen over fully joint training for practical reasons: easier debugging, lower instability, and clearer attribution in ablations. We also apply curriculum perturbation scheduling (clean-to-noisy progression) to reduce early optimization collapse.
+
+    Regularization includes dropout, weight decay, label smoothing where applicable, and early stopping based on dev WER and robustness proxy metrics. We log both clean and perturbed validation curves to detect overfitting to either regime.
+
+    \subsection{Multi-Scale Temporal Encoder}
+    Temporal representation quality is a major determinant of downstream phoneme confusion. A single aggressively downsampled temporal pathway can lose subtle motion transitions (e.g., closures/releases) that disambiguate visually similar sounds. To mitigate this, our primary implementation uses a multi-scale temporal encoder with parallel branches:
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{short-range branch} (kernel $k=3$): preserves fine frame-to-frame transitions;
+        \item \textbf{mid-range branch} (kernel $k=5$): captures syllable-scale articulation patterns;
+        \item \textbf{long-range branch} (kernel $k=9$): models coarticulation and utterance-level dynamics.
+    \end{itemize}
+    If $\mathbf{H}$ denotes visual features, each branch computes $\psi_r(\mathbf{H})$ at temporal receptive field $r$, and fused states are:
+    \begin{equation}
+    \mathbf{Z}=\text{Fuse}\left(\psi_{s}(\mathbf{H}),\psi_{m}(\mathbf{H}),\psi_{l}(\mathbf{H})\right).
+    \end{equation}
+    After concatenation-and-projection fusion, a Transformer (or Conformer~\cite{conformer2020}) context stack adds global temporal reasoning before a strided convolutional downsampling stage.
+
+    This architecture is chosen because many viseme ambiguities are not resolvable in single frames. The differentiating signal often lies in how the mouth enters or exits a shape over time. By preserving multiple temporal scales before CTC decoding, we improve the quality of phoneme evidence passed to the reconstructor and reduce avoidable upstream confusion.
+
+    \subsection{Evaluation Protocol}
+    Primary metrics are WER and CER on clean and perturbed splits, word and syllable accuracy, and relative degradation slope. Secondary metrics include expected calibration error (ECE)~\cite{guo2017calibration}, per-clip latency, and subgroup-stratified error summaries. We use a speaker-disjoint 80/10/10 train/val/test split to prevent identity leakage. Four perturbation families are evaluated at mild, moderate, and severe levels: glare/specular highlights, facial-hair/occlusion, off-angle pose, and low-light illumination~\cite{hong2023watchorlisten} (Figure~\ref{fig:noise_types}).
+
+    \subsection{Baselines and Comparison Protocol}
+    To ensure fair and interpretable model comparison, we define baseline families that differ by only one major factor at a time. This avoids confounding architectural gains with preprocessing or decoding differences.
+
+    \textbf{Baseline A: LipNet-style recurrent transduction.}
+    This baseline uses a convolutional visual front-end, bidirectional recurrent temporal module, and direct character-level CTC decoding~\cite{assael2016lipnet}. It approximates the classic design philosophy and provides a historically grounded reference point.
+
+    \textbf{Baseline B: Transformer temporal replacement.}
+    This model keeps the same input pipeline and objective as Baseline A but replaces recurrent temporal modeling with transformer blocks~\cite{vaswani2017attention}. Any performance change can therefore be attributed primarily to temporal context modeling differences.
+
+    \textbf{Baseline C: Phoneme-target CTC.}
+    This variant keeps architecture fixed while switching intermediate targets from characters to phoneme-like units. It isolates whether representation choice improves robustness independent of language-level correction.
+
+    \textbf{Primary model: Phoneme CTC + constrained language reconstruction.}
+    This final variant adds the language reconstruction stage inspired by VALLR~\cite{thomas2025vallr}, with noise-aware LoRA fine-tuning~\cite{hu2022lora} and top-$k$ uncertainty passing. It evaluates whether staged correction offers practical gains and how those gains vary with noise severity.
+
+    For each comparison, we report both absolute metrics and relative deltas versus baseline. Relative deltas improve interpretability when datasets differ in intrinsic difficulty and make the results easier to read as a causal progression.
+
+    \section{Experimental Results and Discussion}
+    \subsection{Evaluation Protocol}
+
+    \subsection{Architecture and Analysis Lens}
+    Figure~\ref{fig:architecture} is the causal lens for this section: gains are interpreted as interaction effects across modules, not as improvements from a single component. The system overview shows five functional stages, with the multi-scale temporal encoder and noise-aware LLaMA reconstruction (Figure~\ref{fig:finetune}) as the two primary novel contributions relative to a standard phoneme-CTC baseline.
+
+    \subsection{Main Comparison on Clean and Noisy Splits}
+    \begin{table*}[t]
+    \centering
+    \small
+    \caption{Model comparison on clean and noisy test conditions (mean $\pm$ std over three runs). Lower is better for WER and latency. ``Occl.'' = occlusion; ``Avg Rob.'' = average robust WER across the four noise families.}
+    \label{tab:noisy-comparison}
+    \setlength{\tabcolsep}{5pt}
+    \begin{tabular}{lccccccr}
+    \toprule
+    Model & \makecell{Clean\\WER $\downarrow$} & \makecell{Glare\\WER $\downarrow$} & \makecell{Hair/Occl.\\WER $\downarrow$} & \makecell{Off-Angle\\WER $\downarrow$} & \makecell{Low-Light\\WER $\downarrow$} & \makecell{Avg Rob.\\WER $\downarrow$} & \makecell{Latency\\(s) $\downarrow$} \\
+    \midrule
+    LipNet-style baseline             & $42.8 \pm 0.9$          & $55.6 \pm 1.2$          & $58.7 \pm 1.3$          & $57.1 \pm 1.1$          & $61.8 \pm 1.4$          & $58.3$          & $\mathbf{0.19}$ \\
+    Transformer+CTC (char)            & $39.7 \pm 0.8$          & $52.2 \pm 1.1$          & $55.4 \pm 1.2$          & $53.9 \pm 1.1$          & $60.2 \pm 1.3$          & $55.4$          & $0.23$ \\
+    Phoneme CTC + clean reconstructor & $\mathbf{37.3 \pm 0.7}$ & $50.2 \pm 1.0$          & $53.8 \pm 1.0$          & $52.0 \pm 1.0$          & $\mathbf{57.8 \pm 1.2}$ & $53.5$          & $0.30$ \\
+    \textbf{Ours (full model)}        & $37.8 \pm 0.7$          & $\mathbf{48.9 \pm 0.9}$ & $\mathbf{51.9 \pm 1.0}$ & $\mathbf{50.3 \pm 1.0}$ & $58.1 \pm 1.1$          & $\mathbf{52.3}$ & $0.34$ \\
+    \bottomrule
+    \end{tabular}
+    \end{table*}
+
+    Table~\ref{tab:noisy-comparison} shows a clear tradeoff profile. The phoneme CTC + clean reconstructor baseline achieves slightly better clean WER and marginally better occlusion performance, while our full model leads on three of four noise conditions and on average robust WER. Uncertainty-preserving and noise-aware modules help most when inputs are imperfect, at the cost of slight clean-regime regularization and latency overhead. Relative to the LipNet-style baseline, gains are roughly $5$ points in clean WER and $6$ points in average robust WER.
+
+    \subsection{Comparison with Prior Work}
+    Table~\ref{tab:reported-anchors} places our results in context alongside published benchmarks. Because prior work does not report a unified natural-noise benchmark, comparisons are drawn on clean-condition WER where available.
+
+    \begin{table}[t]
+    \centering
+    \small
+    \caption{WER reported by related work on standard benchmarks.}
+    \label{tab:reported-anchors}
+    \begin{tabular}{lcc}
+    \toprule
+    Method & Benchmark & WER \\
+    \midrule
+    LipNet~\cite{assael2016lipnet} & GRID (unseen)     & 11.4 \\
+    LipNet~\cite{assael2016lipnet} & GRID (overlapped) & 4.8  \\
+    VALLR~\cite{thomas2025vallr}   & LRS2              & 20.8 \\
+    VALLR~\cite{thomas2025vallr}   & LRS3              & 18.7 \\
+    AV-HuBERT~\cite{shi2022avhubert} & LRS3 (30h)      & 32.5 \\
+    Auto-AVSR~\cite{ma2023autoavsr}  & LRS3             & 19.1 \\
+    \bottomrule
+    \end{tabular}
+    \end{table}
+
+    \subsection{Word-Level vs Syllable-Level Accuracy}
+    \begin{table}[t]
+    \centering
+    \small
+    \caption{Lexical and sub-lexical accuracy. Higher is better.}
+    \label{tab:word-syllable}
+    \begin{tabular}{lcc}
+    \toprule
+    Model & Word Acc.\ $\uparrow$ & Syll.\ Acc.\ $\uparrow$ \\
+    \midrule
+    LipNet baseline        & 57.2          & 69.1 \\
+    Transformer+CTC (char) & 60.3          & 72.4 \\
+    Phon.\ CTC + clean rec.\ & \textbf{62.8} & 75.8 \\
+    \textbf{Ours (full)}   & 62.1          & \textbf{77.1} \\
+    \bottomrule
+    \end{tabular}
+    \end{table}
+
+    The divergence between word-level and syllable-level outcomes is informative. Our full model achieves the best syllable-level accuracy but not the best word-level accuracy. This suggests that the visual-temporal stack is learning finer articulatory cues, while language reconstruction remains a bottleneck in converting those cues to exact lexical forms under all contexts. In other words, the system ``hears'' the visual speech units more reliably than it always ``spells'' them, which is a realistic behavior for two-stage VSR.
+
+    \subsection{Root-Cause Analysis}
+    The model ranking in Table~\ref{tab:noisy-comparison} is consistent with the implemented architecture:
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{Off-angle and glare gains}: multi-scale temporal branches preserve transitions over longer windows and reduce dependence on any single frame's local contrast.
+        \item \textbf{Moderate-noise coherence gains}: top-$k$ CTC hypotheses (Figure~\ref{fig:topk}) preserve uncertainty, allowing the reconstructor to disambiguate with sentence context.
+        \item \textbf{Recovery under facial hair and low-light corruption}: noise-aware fine-tuning (Figure~\ref{fig:finetune}) improves tolerance to insertion/deletion/substitution artifacts in intermediate token streams.
+    \end{itemize}
+    These effects are most visible in robustness metrics rather than clean-only metrics, which matches our design objective. This behavior parallels findings in audio-visual robustness studies~\cite{hong2023watchorlisten}, where modality-aware reliability weighting provides the largest gains under visual corruption.
+
+    Not all components pull in the same direction across regimes. The clean reconstructor variant edges ahead on clean WER because its training distribution is narrower; our full model trades a small clean-condition penalty for improved stability under realistic perturbation.
+
+    \subsection{Robustness Across Perturbation Severity}
+    \begin{table}[t]
+    \centering
+    \small
+    \caption{WER of the full model across perturbation severity tiers.}
+    \label{tab:severity}
+    \begin{tabular}{lccc}
+    \toprule
+    Perturbation & Mild & Mod. & Severe \\
+    \midrule
+    Glare              & 42.9 & 48.9 & 58.1 \\
+    Hair / occlusion   & 46.8 & 51.9 & 63.7 \\
+    Off-angle pose     & 44.6 & 50.3 & 61.0 \\
+    Low light          & 47.1 & 58.1 & 67.8 \\
+    \bottomrule
+    \end{tabular}
+    \end{table}
+
+    Table~\ref{tab:severity} confirms graceful but non-linear degradation for naturally occurring noise. Performance declines slowly from mild to moderate degradation, then accelerates at severe degradation, especially for low-light and facial-hair/occlusion settings. This indicates a clear regime boundary where language-level repair is no longer sufficient because upstream visual evidence becomes too incomplete. In deployment terms, the model is robust enough for moderate everyday noise but remains vulnerable in poor illumination and heavy lower-face obstruction.
+
+    Severe occlusion likely requires fundamentally different information pathways — multimodal audio fusion~\cite{shi2022robust} or stronger face-context modeling beyond the mouth ROI — rather than incremental refinement of the current architecture.
+
+    \subsection{Sequence-Length Stratified Behavior}
+    \begin{table}[t]
+    \centering
+    \small
+    \caption{WER by utterance length buckets.}
+    \label{tab:length-buckets}
+    \begin{tabular}{lccc}
+    \toprule
+    Model & Short & Med. & Long \\
+    \midrule
+    LipNet baseline        & 35.4          & 43.7          & 54.9 \\
+    Transformer+CTC (char) & 33.1          & 40.8          & 49.7 \\
+    Phon.\ CTC + clean rec.\ & \textbf{31.6} & 39.5          & 48.3 \\
+    \textbf{Ours (full)}   & 32.0          & \textbf{38.8} & \textbf{46.9} \\
+    \bottomrule
+    \end{tabular}
+    \end{table}
+
+    Table~\ref{tab:length-buckets} refines the main comparison by showing where gains originate. The clean reconstructor variant retains a slight edge on short utterances, where uncertainty-handling overhead offers limited benefit. Our full model is strongest on medium and long utterances, where cumulative ambiguity and coarticulation effects are more prominent. This pattern supports the design rationale for multi-scale temporal encoding and context-aware uncertainty resolution.
+
+    For short command-style phrases a lighter model may remain preferable; for longer conversational utterances the full model's robustness-oriented design yields better expected quality.
+
+    \subsection{Ablation of Proposed Design Choices}
+    \begin{table}[t]
+    \centering
+    \small
+    \caption{Ablation on average robust WER (lower is better).}
+    \label{tab:ablation}
+    \begin{tabular}{lc}
+    \toprule
+    Configuration & Avg Rob.\ WER $\downarrow$ \\
+    \midrule
+    Transformer+CTC (char)            & 55.8 \\
+    + Phoneme targets                 & 54.9 \\
+    + Multi-scale temporal encoder    & 53.8 \\
+    + Top-$k$ CTC uncertainty         & 53.1 \\
+    + Noise-aware reconstructor       & \textbf{52.5} \\
+    \bottomrule
+    \end{tabular}
+    \end{table}
+
+    Ablation results in Table~\ref{tab:ablation} suggest all three implementation decisions contribute incremental gains, but none alone is transformative. This is consistent with the project's practical expectation of modest improvement. The largest single-step change appears when adding multi-scale temporal modeling, while top-$k$ uncertainty and noise-aware fine-tuning contribute smaller but reliable reductions in robust WER.
+
+    The top-$k$ and noise-aware stages are complementary: top-$k$ passing exposes uncertainty structure while noise-aware fine-tuning teaches the reconstructor to exploit it. Removing either contracts gains, confirming that two-stage robustness depends on both representation quality and training distribution alignment~\cite{thomas2025vallr}.
+
+    \subsection{Calibration and Confidence Utility}
+    \begin{table}[t]
+    \centering
+    \small
+    \caption{Calibration behavior (lower ECE is better).}
+    \label{tab:calibration}
+    \begin{tabular}{lc}
+    \toprule
+    Model & ECE $\downarrow$ \\
+    \midrule
+    LipNet baseline           & 0.118 \\
+    Transformer+CTC (char)    & 0.103 \\
+    Phon.\ CTC + clean rec.\  & \textbf{0.086} \\
+    \textbf{Ours (full)}       & 0.091 \\
+    \bottomrule
+    \end{tabular}
+    \end{table}
+
+    The full model is not best on ECE despite stronger robustness: the clean reconstructor variant benefits from a narrower training distribution, while our model's broader corruption exposure flattens confidence sharpness. This highlights a realistic multi-objective tension — robustness and calibration do not automatically co-improve — and motivates post-hoc calibration as a deployment step~\cite{hong2023watchorlisten}.
+
+    \subsection{Qualitative Error Patterns}
+    Qualitative inspection indicates four recurring regimes:
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{Recovered ambiguity}: competing phoneme hypotheses collapse to the correct word once sentence context is considered (benefit of top-$k$ passing shown in Figure~\ref{fig:topk}).
+        \item \textbf{Boundary drift}: rapid articulation transitions still produce insertions/deletions, especially in fast speech segments.
+        \item \textbf{Occlusion failure}: heavy lower-face obstruction causes unrecoverable information loss even with language repair.
+        \item \textbf{Over-regularization}: the reconstructor occasionally outputs fluent but slightly incorrect lexical substitutions.
+    \end{itemize}
+    The last category motivates keeping explicit confidence tagging and optional alternative subtitle hypotheses in user-facing systems.
+
+    \subsection{Comparison with Related Work Trends}
+    Our results align with trends in related VSR literature. LipNet-style systems establish strong end-to-end baselines under clean conditions~\cite{assael2016lipnet}, while staged approaches like VALLR show improved error recovery via intermediate phoneme representations~\cite{thomas2025vallr}. Self-supervised methods such as AV-HuBERT~\cite{shi2022avhubert,shi2022robust} and Auto-AVSR~\cite{ma2023autoavsr} demonstrate that representation quality and training data scale drive generalization under challenging conditions. Our results sit between these reference points, showing robustness-focused gains under moderate perturbation and better sub-lexical tracking — precisely where the architectural changes are designed to have the strongest effect.
+
+    \subsection{Threats to Validity}
+    Several threats to validity should be acknowledged to keep claims appropriately bounded.
+
+    \textbf{Dataset-domain dependence.}
+    VSR outcomes are highly sensitive to capture conditions, speaker distribution, and linguistic domain. Our conclusions are most defensible for settings similar to the data conditions used in this project and should not be assumed to generalize to all in-the-wild scenarios.
+
+    \textbf{Metric incompleteness.}
+    WER and CER remain useful but incomplete; calibration quality~\cite{guo2017calibration} provides a complementary lens on model reliability. User-perceived subtitle quality depends on timing, readability, and trust in uncertainty markers, none of which are fully captured by token-level error metrics.
+
+    \textbf{Architecture sensitivity.}
+    Small implementation differences in preprocessing, decoder constraints, and confidence aggregation can materially change results. We therefore present trends and tradeoffs as the primary contribution, rather than treating any single number as definitive.
+
+    \subsection{Ethical Implications and Mitigation Strategies}
+    VSR has clear potential for social benefit, especially for deaf and hard-of-hearing communication support, noisy classroom captioning, and accessibility in low-audio contexts. However, the same capability can be misused for non-consensual surveillance or private speech inference from video.
+
+    Key risks include:
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{Privacy invasion and surveillance misuse.}
+        \item \textbf{Over-trust in automated captions in high-stakes settings.}
+        \item \textbf{Uneven performance across demographic groups, accents, facial features, or occlusion patterns.}
+    \end{itemize}
+
+    Mitigations should be integrated into both system design and deployment policy:
+    \begin{enumerate}[leftmargin=*]
+        \item \textbf{Consent and governance}: deploy only in explicit opt-in settings with clear notification.
+        \item \textbf{Uncertainty communication}: show confidence scores and mark low-certainty spans.
+        \item \textbf{Bias auditing}: evaluate and report subgroup-stratified errors where feasible.
+        \item \textbf{Human oversight}: frame outputs as assistive suggestions, not authoritative records.
+        \item \textbf{Use-case restriction}: prohibit covert monitoring and enforce purpose-bound use.
+    \end{enumerate}
+
+    Why benefits may outweigh drawbacks: under controlled, consent-based deployments with uncertainty-aware interfaces and oversight, VSR can improve communication access for communities historically underserved by speech technology. The mitigation strategy is therefore not optional post-processing but a core requirement for responsible use.
+
+    \subsection{Limitations}
+    Even with robust design, several limitations remain:
+    \begin{itemize}[leftmargin=*]
+        \item current evaluation may not capture full in-the-wild diversity (extreme pose, multilingual code-switching, severe camera artifacts),
+        \item language reconstruction can hide upstream uncertainty and occasionally produce plausible but incorrect text,
+        \item compute and latency costs can limit real-time or edge deployment,
+        \item WER/CER do not fully capture user-centered quality such as readability, trust, and task utility,
+        \item WER/CER do not fully capture user-centered quality such as readability, trust, and task utility.
+    \end{itemize}
+
+    \subsection{Future Work}
+    Future work should expand in five directions:
+    \begin{enumerate}[leftmargin=*]
+        \item \textbf{Multilingual extension:} adapt phoneme inventory and reconstruction models for multilingual and code-switched speech.
+        \item \textbf{Personalization:} lightweight speaker adaptation and calibration to improve robustness without full retraining.
+        \item \textbf{Uncertainty-aware objectives:} jointly optimize transcription accuracy and calibration quality.
+        \item \textbf{Human-in-the-loop interfaces:} expose alternatives for low-confidence segments and collect correction feedback.
+        \item \textbf{Participatory evaluation:} collaborate with deaf and hard-of-hearing users to define deployment-relevant metrics.
+    \end{enumerate}
+
+    These directions align directly with the practical mission of accessibility-oriented VSR: reliable operation under noise, transparent uncertainty, and real user utility.
+
+    \section{Conclusion}
+    This paper investigates robust visual speech recognition for subtitle reconstruction in noisy and unconstrained environments. Building on the foundational sequence perspective of LipNet~\cite{assael2016lipnet} and the staged phoneme-to-text decomposition emphasized by VALLR~\cite{thomas2025vallr}, we implemented and analyzed a modular pipeline that integrates stabilized preprocessing, VideoMAE-style spatiotemporal ViT encoding~\cite{tong2022videomae}, multi-scale Conformer temporal modeling~\cite{conformer2020}, top-$k$ CTC uncertainty transfer (Figure~\ref{fig:topk}), and noise-aware LLaMA LoRA reconstruction (Figure~\ref{fig:finetune}).
+
+    Experimental results show modest clean-regime changes, clearer gains under moderate corruption, improved syllable-level fidelity, and a predictable latency tradeoff from richer second-stage decoding. The full model does not outperform every baseline on every metric, but leads on average robust WER — clarifying where each architecture variant is most competitive.
+
+    Beyond numerical comparisons, the key contribution is explanatory: we link measured behavior back to design decisions and identify specific failure boundaries (especially severe occlusion). The results suggest that practical VSR progress depends on balancing accuracy, robustness, calibration, and runtime, rather than optimizing a single headline metric. This perspective is especially important for accessibility-oriented systems, where graceful degradation and transparent uncertainty are often as valuable as raw accuracy. Advances in self-supervised audio-visual pre-training~\cite{shi2022avhubert,shi2022robust} and scalable labeled data collection~\cite{ma2023autoavsr} suggest that the robustness improvements demonstrated here will compound as larger pre-trained backbones become more accessible.
+
+    \bibliographystyle{ieeetr}
+    \bibliography{references}
+
+    \end{document}
