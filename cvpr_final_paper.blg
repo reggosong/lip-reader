@@ -5,15 +5,15 @@ The style file: ieeetr.bst
 Database file #1: references.bib
 You've used 19 entries,
             1876 wiz_defined-function locations,
-            563 strings with 7425 characters,
-and the built_in function-call counts, 4698 in all, are:
-= -- 341
-> -- 323
+            564 strings with 7207 characters,
+and the built_in function-call counts, 4564 in all, are:
+= -- 340
+> -- 292
 < -- 0
-+ -- 114
-- -- 95
-* -- 365
-:= -- 734
++ -- 104
+- -- 85
+* -- 345
+:= -- 704
 add.period$ -- 19
 call.type$ -- 19
 change.case$ -- 19
@@ -21,8 +21,8 @@ chr.to.int$ -- 0
 cite$ -- 19
 duplicate$ -- 257
 empty$ -- 469
-format.name$ -- 95
-if$ -- 1080
+format.name$ -- 85
+if$ -- 1058
 int.to.chr$ -- 0
 int.to.str$ -- 19
 missing$ -- 19

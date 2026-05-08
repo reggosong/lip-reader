@@ -74,11 +74,9 @@ T.~Afouras, J.~S. Chung, A.~Senior, O.~Vinyals, and A.~Zisserman, ``Deep
   audio-visual speech recognition,'' {\em arXiv preprint arXiv:1809.02108},
   2018.
 
-\bibitem{touvron2023llama2}
-H.~Touvron, L.~Martin, K.~Stone, P.~Albert, A.~Almahairi, Y.~Babaei,
-  N.~Bashlykov, S.~Batra, P.~Bhargava, S.~Bhosale, {\em et~al.}, ``Llama 2:
-  Open foundation and fine-tuned chat models,'' {\em arXiv preprint
-  arXiv:2307.09288}, 2023.
+\bibitem{meta2024llama32}
+M.~AI, ``The llama 3 herd of models,'' {\em arXiv preprint arXiv:2407.21783},
+  2024.
 
 \bibitem{hong2023watchorlisten}
 J.~Hong, M.~Kim, J.~Yeo, and Y.~M. Ro, ``Watch or listen: Robust audio-visual
